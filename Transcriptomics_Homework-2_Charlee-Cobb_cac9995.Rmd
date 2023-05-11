@@ -1,0 +1,143 @@
+---
+title: "Transcriptomics_Homework-2_Charlee-Cobb_cac9995"
+author: "Charlee Cobb"
+date: "2023-02-20"
+output: pdf_document
+---
+**Part 1: Answer the following questions. (20 pts)**
+**__________________________________________________________________**
+***1. Why is it important to know the variance and standard error of a statistic***
+***for sample data? How do we calculate these values in R?***
+Understanding variance in data is important because it shows the difference a 
+given point has from the mean. This would show if our data had many points that
+are outliers or how spread out our data is. Standard error compares the mean of
+a sample to the mean of the population, and the value helps us decide how 
+representative a sample is for the population. To calculate the standard error
+in R by getting the value of standard deviation with the function sd(), and 
+dividing that value by the square root of the number of samples. To get variance
+in R, we can use the var() function on the sample dataset.
+
+
+***2. What are the differences between the varieties of two-sample t-tests,***
+***and how can we tell which to use and how do we tell R how to apply***
+***the correct test using t-test()?***
+Paired t-test and unpaired t-tests are the varieties of two-sample t-tests. Paired
+t-tests look at two samples that are related to each other. For example, in the 
+paired t-test we might compare two different observations of one cancer tumor in
+different from different time points, pretreatmnt and after treatment. With 
+Unpaired t-tests, the two samples are completely independent from each other. 
+In R, you use the t.test() function, and set the flag 'paired' to TRUE for a 
+paired t-test, and FALSE for an unpaired t-test.
+
+
+***3. What is the R function for a nonparametric equivalent to a two-sample t-test?***
+The wilcoxon test using the wilcox_test() function.
+
+
+***4. What statistic is more appropriate when you want to identify***
+***interactions between multiple factors?***
+ANOVA statistics are better to use when checking interactions between multiple
+factors.
+
+
+***5. When is the lm() function more appropriate to use than aov()***
+***function to perform an anova analysis?***
+aov() looks at variation within groups and variation between groups without respect
+to each other. lm() looks for the slope made in the data, and looks at each slope separately.
+
+
+**Part 2: We will be working with a publicly available dataset: GSE63741.**
+**The experiment compares expression of a set of genes during different skin**
+**diseases. Our goal is to identify the genes that are significantly different**
+**from the control (healthy) samples. (80pts)**
+**__________________________________________________________________**
+***1. Write a function getPvalue that performs a linear model lm() to***
+***compare the control samples to the different skin diseases. (40pts)***
+***- The function should have two inputs***
+    ***1: numerical vector of all values for one gene,***
+    ***2: a factor that specifies which column belongs to which group.***
+***- The function should have one output ( a vector of p-values for***
+***each disease coefficient.***
+```{r}
+#getPvalue fucntion
+
+getPvalue <- function(vect, fact){
+  gene <- unlist(vect, use.names = FALSE)
+  p <- lm(gene ~ fact)$coefficients
+  return(p)
+}
+```
+
+
+***2. Use the getPvalue function in a loop or apply function to retrieve the***
+***pvalues for each gene. (10pts)***
+```{r}
+#load data sets
+GSE63741 <- read.delim("GSE63741_series_matrix.txt")
+sample <- read.delim("sampletype.txt")
+#head(GSE63741) #< used to check object
+#head(sample) #< used to check object
+
+#make factor of groups
+group_names <- unlist(sample[1,], use.names = FALSE)
+#group_names #< used to check object
+group_factor <- factor(group_names)
+group_factor #< used to check object
+
+#making a test run to help model the function
+testing <- lm(unlist(GSE63741[1, 2:151], use.names = FALSE) ~ group_factor)$coefficients
+
+#I tried to use the function I worte above, but kept running into bugs when I 
+#ran this:
+#res <- apply(GSE63741, 1, getPvalue(vect = GSE63741[2:151], fact=group_factor) )
+
+
+#So I wrote the function in-line with the apply function
+res <- apply(GSE63741, 1, function(x) lm(x[2:151]~group_factor)$coefficients)
+head(res)
+hist(res)
+sum(res < -0.05)
+```
+
+
+
+***3. Adjust the p-values using the FDR method. (20pts)***
+```{r}
+adjusted_pvalue <- p.adjust(res, method = "fdr")
+```
+
+
+
+***4. Gene regulation: How many genes have an adjusted p-value < 0.05 in at***
+***least one skin disease? (10pts)***
+in total, 4336 genes had an adjusted p value above 0.05. In Eczema alone, there
+were 869 genes that have an adjusted p-value over 0.05
+```{r}
+sum(adjusted_pvalue < 0.05)
+
+eczema <- res[2,]
+adjusted_eczema <-p.adjust(eczema, method = "fdr")
+sum(adjusted_eczema < 0.05)
+```
+
+
+
+
+unrelated test:
+```{r}
+
+#subset data into control and treatment dataframes
+control_df <- GSE63741[ ,2:32]
+treated_df <- GSE63741[ ,33:151]
+
+head(control_df)
+head(treated_df)
+
+#calculate the means of each row, then save those means in a vector
+control_means <- rowMeans(control_df)
+treated_means <- rowMeans(treated_df)
+
+#testing to see lm between vector of means
+head(control_means)
+lm(control_means ~ treated_means)
+```

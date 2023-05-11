@@ -1,0 +1,283 @@
+---
+title: "Homework 4"
+author: "Charlee Cobb"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, error=TRUE)
+```
+
+### Data source
+
+The data was downloaded from NCBI GEO ([GSE124548](https://www.ncbi.nlm.nih.gov/geo/query/acc.cgi?acc=GSE124548)). The study looks at the affect of a drug (Lumacaftor/Ivacaftor) to treat cystic fibrosis ( CF ). This drug has been approved for individuals that are homozygous for CFTR ( Cystic fibrosis transmembrane conductance regulator ) mutation. Clinical studies have observed that there is a large variation in the response thus the researchers are looking at RNA expressions to help identify the cause of this variation. Blood samples were taken from : 
+- 20 healthy patients ( do not have CF )
+- 20 patients that CF ( before treatment )
+- 20 patients that have CF ( after treatment - these are paired with those before treatment)
+
+I have extracted the raw read counts from the original matrix and provided it with the homework. The healthy patients have "HC" in their names, CF patients before treatment are labeled "Base" and after treatment are labeled "V2".
+
+For the homework we will compare the HC with Base to do a simple unpaired differentially expression.
+
+### Step 1 (5pts)
+
+Load the file **GSE124548.raw.txt** and create a new dataframe with just the columns with the raw counts for healthy (HC) and CF patients before treatment (Base) and call it **readcount**. Use the *third* column (EntrezID) in the original file as the rownames of readcount.
+
+```{r readdata}
+
+gse124548 <- read.delim("GSE124548.raw.fixed.txt")
+
+#subset gse124548 and keep only the columns with "HC" and BASE, change rownames
+geneIDs <- gse124548$EntrezID
+col_names <- colnames(gse124548)
+new_col_names <- c("Raw_10_HC_Auto_066_237", "Raw_11_Orkambi_006_Base", "Raw_13_HC_Auto_068_239", "Raw_14_Orkambi_007_Base", "Raw_16_HC_Auto_072_243", "Raw_17_Orkambi_009_Base", "Raw_19_HC_Auto_074_245", "Raw_1_Orkambi_001_Base", "Raw_20_Orkambi_010_Base", "Raw_21_HC_Immune_004", "Raw_23_HC_Auto_076_247", "Raw_24_Orkambi_012_Base", "Raw_26_HC_Auto_078_249", "Raw_27_Orkambi_013_Base", "Raw_29_HC_Auto_080_251", "Raw_30_Orkambi_014_Base", "Raw_3_HC_Auto_062_233", "Raw_42_HC_Auto_089_261", "Raw_4_HC_Immune_002", "Raw_5_Orkambi_002_Base", "Raw_7_HC_Auto_064_235", "Raw_8_Orkambi_004_Base", "Raw_HC_Auto_082_253", "Raw_HC_Auto_084_255", "Raw_HC_Auto_088_259", "Raw_HC_Auto_091_263", "Raw_HC_Auto_093_265", "Raw_HC_Auto_095_267", "Raw_HC_Immune_006", "Raw_HC_Immune_008", "Raw_Orkambi_015_Base", "Raw_Orkambi_016_Base", "Raw_Orkambi_017_Base", "Raw_Orkambi_018_Base", "Raw_Orkambi_020_Base", "Raw_Orkambi_021_Base", "Raw_Orkambi_022_Base", "Raw_Orkambi_024_Base", "Raw_Orkambi_025_Base", "Raw_Orkambi_026_Base")
+
+readcount <- as.data.frame(gse124548[ ,new_col_names])
+row.names(readcount) <- geneIDs
+```
+
+
+### Step 2 (5pts)
+
+Create a dataframe, called **expgroup**, with one column, labeled **condition**, that correctly assigns which column is healthy and which is CF. Use the column names of readcount as rownames of expgroup.
+
+```{r createfactor}
+
+expgroup <- data.frame(condition = c(1:40))
+row.names(expgroup) <- new_col_names
+
+#HC == healthy
+#base == CF
+
+expgroup[grep("HC", row.names(expgroup)), 1] = "healthy"
+expgroup[grep("Base", row.names(expgroup)), 1] = "CF"
+```
+
+### Step 3 (5pts)
+
+Load the Deseq2 package ( install if necessary ) and create a Counts Dataset Matrix using the command **DESeqDataSetFromMatrix()** and call it **cds**.
+
+```{r runDESeq2} 
+library(DESeq2)
+
+cds <- DESeqDataSetFromMatrix(countData = readcount, colData = expgroup, design = ~ condition)
+
+```
+
+### Step 4 (5pts)
+
+Use the functions **estimateSizeFactors** and **estimateDispersions** so that Deseq2 can correct for size of library and estimates the dispersion. Plot the dispersion using **plotDispEsts**. What does the graph tell you?
+  - The Dispersion Estimates graph shows the estimated dispersion value for the gene's expression strength between our two samples (healthy and cf). The goal in creating this graph is to visulize how much variation is in the dataset. In the graph below, the read line is the expected dipersion value given an expression strength. We can see in this graph that as the mean of normalized counts increase, the dispersion slightly decreases. According to DESeq2 documentation, this indcates that our data is a good fit for DESeq2 analysis as it doesn't show signs of contamination or other extreme outling data points.
+```{r estimate}
+library(DESeq2)
+cds_factors <- estimateSizeFactors(cds)
+cds_dispersion <- estimateDispersions(cds_factors)
+plotDispEsts(cds_dispersion)
+
+```
+
+### Step 5 (5pts)
+
+Perform the Differential expression and obtain the results using **DESeq** and **results** functions.
+
+```{r deseqres}
+library(DESeq2)
+diffexp_cds <- DESeq(cds)
+diffexp_res_cds <- results(diffexp_cds)
+diffexp_res_cds
+```
+
+### Step 6 (5pts)
+
+How many genes have an adjusted p-value of less than 0.05 and log2FoldChange greater than 1 or less than -1 ? Save this list of genes as **diffexpgenes**
+- 209 genes have an adjusted p-value of less than 0.05 and log2FoldChange greater than 1 or less than -1.
+```{r diffexp}
+library(DESeq2)
+#find number of genes
+res <- sum(diffexp_res_cds$padj < 0.05 & diffexp_res_cds$log2FoldChange > 1 | diffexp_res_cds$padj < 0.05 & diffexp_res_cds$log2FoldChange < -1, na.rm=TRUE)
+res
+
+#create dataframe where pvalue is < 0.05 and log2FoldChange > 1 or log2FoldChange < -1
+res_genes <- diffexp_res_cds[diffexp_res_cds$padj < 0.05 & diffexp_res_cds$log2FoldChange > 1 | diffexp_res_cds$padj < 0.05 & diffexp_res_cds$log2FoldChange < -1, ]
+
+diffexpgenes <- row.names(res_genes)
+```
+
+
+### Step 7 (5pts)
+
+Get the normalized values of the counts data in cds using the counts() function with
+option normalized=T and call this normvalues.
+
+```{r normvalues}
+library(DESeq2)
+#needed to use the estimateSizeFactors(cds) object because the cds object wouldn't run with 
+#the normalized=TRUE option
+normvalues <- counts(cds_factors, normalized=TRUE)
+
+```
+
+### Step 8 (5pts)
+
+Create a new matrix or dataframe that contains the expression values from normvalues for just
+the diffexpgenes and call it diffexpvalues.
+
+```{r diffvalues}
+
+#subset normvalues to have only the diffexpgenes genes
+diffexpvalues <- normvalues[diffexpgenes, ]
+
+```
+
+### Step 9 (10pts)
+
+Cluster the differentially expressed genes using hierarchical clustering and use the cutree
+function to create 8 groups. How many genes are in each group?
+  - Group 1 has 185 genes, Group 2 has 2 genes, Group 3 has 2 genes, Group 4 has 11 genes, Group 5 has 3 genes, Group 6 has 3 genes, group 7 has 2 genes, and Group 8 has 1 gene. While the distribution size is inconsistent, this is expected when clustering in large group sizes.
+  
+```{r diffgroups}
+library(cluster)
+#create an hclust object with the diffexpvalues matirx
+sig_dist = as.dist(1 - cor(t(diffexpvalues)))
+sig_hclust = hclust(sig_dist, method="average")
+plot(sig_hclust)
+
+sig_hclust_8 = cutree(sig_hclust, k=8)
+head(sig_hclust_8)
+
+
+
+#get genes from each group
+sig_hclust_g1= diffexpvalues[names(which(sig_hclust_8==1)),]
+sig_hclust_g2= diffexpvalues[names(which(sig_hclust_8==2)),]
+sig_hclust_g3= diffexpvalues[names(which(sig_hclust_8==3)),]
+sig_hclust_g4= diffexpvalues[names(which(sig_hclust_8==4)),]
+sig_hclust_g5= diffexpvalues[names(which(sig_hclust_8==5)),]
+sig_hclust_g6= diffexpvalues[names(which(sig_hclust_8==6)),]
+sig_hclust_g7= diffexpvalues[names(which(sig_hclust_8==7)),]
+sig_hclust_g8= diffexpvalues[names(which(sig_hclust_8==8)),]
+
+nrow(sig_hclust_g1)
+nrow(sig_hclust_g2)
+nrow(sig_hclust_g3)
+nrow(sig_hclust_g4)
+nrow(sig_hclust_g5)
+nrow(sig_hclust_g6)
+nrow(sig_hclust_g7)
+nrow(sig_hclust_g8)
+
+#showing pheat map of group 1
+library(pheatmap)
+pheatmap(sig_hclust_g1,annotation_col = expgroup,
+         scale="row", cluster_cols = F, show_rownames = F)
+
+
+#showing pheat map of group 4
+pheatmap(sig_hclust_g4,annotation_col = expgroup,
+         scale="row", cluster_cols = F, show_rownames = F)
+
+```
+
+### Step 10 (10pts)
+
+Create a heatmap of all the genes using the **pheatmap** package. Some options you should pay attention to are:
+- scale ( scaling gene values shows expression pattern changes rather than magnitude)
+- cluster_rows ( define how the rows should be clustered)
+- annotation_col ( color code the different samples based on a category- health or cf)
+- annotation_row ( color code the different genes based on the cluster they belong to)
+
+```{r heatmap}
+library(pheatmap)
+#defining a dataframe to use as row annotation for cluster
+
+#expgroup[grep("HC", row.names(expgroup)), 1] = "healthy"
+
+my_gene_col <- data.frame(cluster = ifelse(test = sig_hclust_8 == 1, yes = "cluster 1", 
+                                           no = ifelse(test=sig_hclust_8 == 2, yes = "cluster 2",
+                                                       no = ifelse(test = sig_hclust_8 == 3, yes = "cluster 3",
+                                                                   no = ifelse(test = sig_hclust_8 == 4, yes = "cluster 4",
+                                                                               no = ifelse(test = sig_hclust_8 == 5, yes = "cluster 5",
+                                                                                           no = ifelse(test = sig_hclust_8 == 6, yes = "cluster 6",
+                                                                                                       no = ifelse(sig_hclust_8 == 7, yes = "cluster 7",
+                                                                                                                   no = "cluster 8"))))))))
+
+
+
+
+  
+#heatmap with normalized diff expressed genes, ungrouped, added annotation of
+#'healthy' or 'CF', added cluster annotation
+pheatmap(diffexpvalues, annotation_col = expgroup, annotation_row = my_gene_col,
+         scale="row", cluster_cols = F, show_rownames = F, clustering_method = "average")
+
+
+```
+Below are examples of heatmaps with different adjustments of scale, and row
+clustering
+```{r}
+#adjusting scale to 'column' with normalized diff expressed genes, ungrouped, added annotation of
+#'healthy' or 'CF', added cluster annotation
+pheatmap(diffexpvalues,annotation_col = expgroup,
+         scale="column", cluster_cols = F, show_rownames = F)
+
+#adjusting scale to 'none' with normalized diff expressed genes, ungrouped, added annotation of
+#'healthy' or 'CF', added cluster annotation
+pheatmap(diffexpvalues,annotation_col = expgroup,
+         scale="none", cluster_cols = F, show_rownames = F)
+
+```
+
+
+```{r}
+#clustering rows by euclidean distance with normalized diff expressed genes, ungrouped, added annotation of
+#'healthy' or 'CF', added cluster annotation
+pheatmap(diffexpvalues, annotation_col = expgroup, annotation_row = my_gene_col,
+         scale="row", cluster_cols = F, clustering_method = "average",
+         cluster_rows = T, clustering_distance_rows = "euclidean", show_rownames = F)
+
+
+#clustering rows by correlation distance with normalized diff expressed genes, ungrouped, added annotation of
+#'healthy' or 'CF', added cluster annotation
+pheatmap(diffexpvalues, annotation_col = expgroup, annotation_row = my_gene_col,
+         scale="row", cluster_cols = F,
+         cluster_rows = T, clustering_distance_rows = "correlation", show_rownames = F)
+
+
+```
+
+### Step 11 (10pts)
+
+Use the GOstats package to determing which GO-terms are enriched in **diffexpgenes**. To do this you will need to install the following packages from Bioconductor:
+ - Note: I downloaded the necessary libraries in the console of Rstudio and removed the code chunk
+ 
+Now create a new **GOHyperGParams** object using the **new()** function and save it as variable called **params**. The **geneIds** is **diffexpgenes**. These should be the EntrezIDs we made into rownames in the beginning. The **universeGeneIds** is the rownames of **readcount**. The annotation is **org.Hs.eg** and the ontology we are going to use is **BP** with a pvaluecutoff of 0.001 and our testDirection is **over**.
+```{r gostats}
+library(GOstats)
+library(GO.db)
+library(Category)
+library(org.Hs.eg.db)
+
+
+params <- new("GOHyperGParams", 
+  geneIds=diffexpgenes, 
+  universeGeneIds=rownames(readcount), 
+  annotation="org.Hs.eg", 
+  ontology="BP", 
+  pvalueCutoff=0.001, 
+  conditional=TRUE, 
+  testDirection="over")
+
+
+overRepresented <- hyperGTest(params)
+sum_rep <- summary(overRepresented)[,c(1,2,5,6,7)]
+
+#sort the column function to show genes with highest count number
+#show top 10 highest gene counts
+overRepresented_Count <- sum_rep[order(-sum_rep$Count), ]
+head(overRepresented_Count, n=10)
+
+```
+
+### Step 12 (5pts)
+What conclusions can you make about your analysis?
+  - Based on the GO Terms, it seems that a majority of immune response and cell defense pathways are being expressed differently between the 'healthy' and 'cf' patients. The increased defense immune response may also be a result of infection from CF patients as mucus in the longs is retaining harmful bacteria and viruses. Signaling and cell communication are the two highest counts of genes, and this could be due to because the fact that there is a change in cell state or cell activity that requires more or less RNA to be produced. It would be necessary to see the variation between treated patients to pinpoint how the expression of immune response is changed and expression in cellular communication is changed.

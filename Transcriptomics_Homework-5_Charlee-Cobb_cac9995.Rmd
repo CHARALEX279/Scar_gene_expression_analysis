@@ -1,0 +1,169 @@
+---
+title: "Transcriptomics Homework 5"
+author: "Charlee Cobb"
+date: "2023-04-24"
+output: pdf_document
+---
+
+#Step 1: Load the TSV file
+```{r}
+library(dplyr)
+library(Seurat)
+library(patchwork)
+
+tsv <- read.delim("GSM3036909.tsv")
+
+```
+
+
+
+#Step 2: Create a Seurat object.
+Call the object pdac1. You set the project argument in the CreateSeuratObject the same. Here we will also request the same criteria as mentioned in the workflow: min.cells=3 and min.features=200
+```{r}
+
+pdac1 <- CreateSeuratObject(counts = tsv, project = "pdac1", min.cells = 3, min.features = 200)
+pdac1
+```
+
+
+
+#Quality control
+#Step 3: Label the Mitochondrial genes
+We don’t want to use cells that have too many mitochondrial genes, so we create a new column to help us summarize how many mitochondrial genes were identified in the different cells.
+```{r}
+pdac1[["percent.mt"]] <- PercentageFeatureSet(pdac1, pattern = "^MT-")
+head(pdac1$percent.mt)
+```
+
+
+#Step 4: Visualize the distribution
+Use the VlnPlot function to view the number of counts, number of features, and the percent mitochondrial genes.
+
+```{r}
+VlnPlot(object = pdac1, features = c("nFeature_RNA", "nCount_RNA", "percent.mt"), ncol = 3)
+```
+
+
+#Step 5: Filter data
+Only keep the cells that have greater than 200 and less than 2500 unique features and the percent mitochondrial genes is less than 5.
+```{r}
+pdac1_subset <- subset(x = pdac1, subset = nFeature_RNA > 200 & nFeature_RNA < 2500 & percent.mt < 5)
+```
+
+
+#Normalization
+#Step 6: Normalize data
+Taking the log of the data, makes the data more normal distributed. Normalize data using the LogNormalize method with a scale factor of 10,000
+```{r}
+pdac1_subset <- NormalizeData(object = pdac1_subset, normalization.method = "LogNormalize", scale.factor = 1e4)
+```
+
+
+#Step 6: Calculate gene variation
+Find the 2000 most variable genes using the FindVariableFeatures command using the vst method.
+```{r}
+pdac1_subset <- FindVariableFeatures(object = pdac1_subset,selection.method = 'vst', nfeatures = 2000)
+
+# Identify the 10 most highly variable genes
+top10 <- head(x = VariableFeatures(object = pdac1_subset), 10)
+
+# plot variable features with and without labels
+plot1 <- VariableFeaturePlot(object = pdac1_subset)
+plot2 <- LabelPoints(plot = plot1, points = top10, repel = TRUE)
+CombinePlots(plots = list(plot1, plot2))
+```
+
+
+#PCA
+#Step 7: Scale data
+Scaling the data normalizes the standard deviation and centers the data. This is an important step before performing PCA.
+```{r}
+all.genes <- rownames(x = pdac1_subset)
+pdac1_subset <- ScaleData(object = pdac1_subset, features = all.genes)
+pdac1_subset <- ScaleData(object = pdac1_subset)
+```
+
+
+#Step 8: PCA
+#Step 9: Visualize data using VizDimLoadings and DimPlot functions. Can you tell from the PCA analyis, the number of cell types that are present?
+Not clearly, approximately 500 cell types
+```{r}
+pdac1_subset <- RunPCA(object = pdac1_subset, features = VariableFeatures(object = pdac1_subset))
+print(x = pdac1_subset[['pca']], dims = 1:5, nfeatures = 5)
+VizDimLoadings(object = pdac1_subset, dims = 1:2, reduction = 'pca')
+DimPlot(object = pdac1_subset, reduction = 'pca')
+```
+
+
+
+#Step 10: PCA heatmaps
+Another way to visualize the variation explained by the PC is creating heatmaps. Create heatmaps of the first 10 dimensions and include 200 cells.
+```{r}
+DimHeatmap(object = pdac1_subset, dims = 1, cells = 200, balanced = TRUE)
+```
+
+
+#Step 11: Dimensionality
+To make this more quantitative, let’s see when does the variation reach the lowest amount of variation explained. Use the JackStraw method with 100 replicates and score the first 20 dimensions.
+```{r}
+pdac1_subset <- JackStraw(object = pdac1_subset, num.replicate = 100)
+pdac1_subset <- ScoreJackStraw(object = pdac1_subset, dims = 1:20)
+```
+
+Plot the results for the first 20 dimensions.
+```{r}
+JackStrawPlot(object = pdac1_subset, dims = 1:15)
+```
+
+Use the elbow plot
+```{r}
+ElbowPlot(object = pdac1_subset)
+```
+
+
+#Step 12: Clustering.
+Now we will group together the cells based on where they are located in the different dimensions. Use the FindNeighbors function using the first 9 dimensions.
+```{r}
+pdac1_subset <- FindNeighbors(object = pdac1_subset, dims = 1:10)
+pdac1_subset <- FindClusters(object = pdac1_subset, resolution = 0.5)
+```
+
+And then identify the clusters using the FindClusters function.
+```{r}
+head(x = Idents(object = pdac1_subset), 5)
+```
+
+
+
+#tsne/umap
+#Step 13: Perform a UMAP analysis using the first 9 dimensions using RunUMAP and then visualize it using DimPlot.
+How many clusters do you get? How many possible mistakes do you see?
+- About 6 distinct clusters, maybe around 8 misplaced cells?
+```{r}
+pdac1_subset <- RunUMAP(object = pdac1_subset, dims = 1:10)
+```
+```{r}
+DimPlot(object = pdac1_subset, reduction = 'umap')
+```
+
+
+#Step 14: Identify the markers that compare each cluster agains all. Report only positively markers. Use the FindAllMarkers for this.
+```{r}
+cluster1.markers <- FindMarkers(object = pdac1_subset, ident.1 = 0, logfc.threshold = 0.25, test.use = "roc", only.pos = TRUE)
+head(cluster1.markers)
+```
+
+
+#Step 15: Create a violin plot using one feature from each cluster.
+```{r}
+#VlnPlot(object = pdac1_subset, features = cluster1.markers)
+
+
+```
+
+
+#Step 16: Create a feature plot using the same features as before.
+```{r}
+#FeaturePlot(object = pdac1_subset, features = c("MS4A1", "GNLY", "CD3E", "CD14", "FCER1A", "FCGR3A", "LYZ", "PPBP", "CD8A"))
+```
+
