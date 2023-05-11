@@ -1,0 +1,824 @@
+---
+title: "Keloid RNAS seq Analysis"
+author: "Charlee Cobb"
+date: '2023-04-21'
+output:
+  html_document:
+    df_print: paged
+  pdf_document: default
+---
+
+### Introduction 
+
+I chose to complete my project on this experiment because I think more research is needed on the pathogenesis of keloid scarring. For context, keloids are thought to be caused by abnormal wound healing because of altered gene expression in the wound healing tissue (Choi, M.). These scars disproportionately impact people of Asian and African descent. While keloid scars are classified as benign growths, the scars cause great discomfort to the individual physically and psychologically. I hope to discover two things by analyzing the sequences in this experiment. First, verify that genes related to nervous system processes were upregulated in keloids, and genes related to immune responses were downregulated in keloids as the paper describes. Second, create a transcription factor network to discover target transcription factors for  treatment.
+
+There are three factors in this experiment, Keloid Scars,  Hypertrophic Scars, and Normotrophic Scars. Each factor contains a varying number of samples, Keloid Scars have four samples, Hypertrophic Scars have five samples, and Normotrophic Scars have three samples. The samples come from scars located on different parts of the body, which is a level that can be addressed in analysis.
+
+```{r, eval=FALSE}
+#all needed packages/installs
+install.packages("BiocManager")
+BiocManager::install("Rsubread")
+BiocManager::install("DESeq2")
+BiocManager::install("GOstats")
+BiocManager::install("GO.db")
+BiocManager::install("Category")
+BiocManager::install("org.HG.tair.db")
+BiocManager::install("biomaRt")
+install.packages("biomartr", dependencies = TRUE)
+BiocManager::install("decoupleR")
+BiocManager::install("OmnipathR")
+BiocManager::install("edgeR")
+BiocManager::install("topGO")
+```
+
+
+### DESeq2 analysis
+
+Reads were obtained from SRA Run Selector: PRJNA780889 / GEO accession: GSE188952. Samples are skin/scar samples from multiple locations on the body, mostly ear, upper leg, and abdomen. I processed the raw reads on Galaxy and followed the protocol of the paper. First, I used Cutadapt (version 2.3) to remove adaptors on the reads and I filtered out and reads shorter than 50 base pairs. Following trimming, I aligned the reads to the human reference genome and gene annotation (Gencode V22) with STAR aligner 2-pass mode. Finally, I quantificated read counts HTSeq and used the setting with intersection-nonempty mode. Twelve tabular files were produced, and they are included in the corresponding zip folder. I combined these tab delimited files to make a single count matrix called "readcounts."
+
+```{r}
+library(tibble)
+
+HypertrophicScar_01 <- read.delim2("SRR16957459.tabular")
+HypertrophicScar_02 <- read.delim("SRR16957460.tabular")
+HypertrophicScar_03 <- read.delim("SRR16957461.tabular")
+HypertrophicScar_04 <- read.delim("SRR16957462.tabular")
+HypertrophicScar_05 <- read.delim("SRR16957463.tabular")
+keloid_01 <- read.delim("SRR16957464.tabular")
+keloid_02 <- read.delim("SRR16957465.tabular")
+keloid_03 <- read.delim("SRR16957466.tabular")
+keloid_04 <- read.delim("SRR16957467.tabular")
+normotrophicScar_01 <- read.delim("SRR16957468.tabular")
+normotrophicScar_02 <- read.delim("SRR16957469.tabular")
+normotrophicScar_03 <- read.delim("SRR16957470.tabular")
+
+df_list <- list(HypertrophicScar_01, HypertrophicScar_02, HypertrophicScar_03,
+                    HypertrophicScar_04, HypertrophicScar_05, keloid_01, keloid_02,
+                    keloid_03, keloid_04, normotrophicScar_01, normotrophicScar_02,
+                    normotrophicScar_03)
+
+
+#merge around GeneID
+readcounts <- as.data.frame(df_list)
+readcounts <- data.frame(readcounts, row.names = 1)
+readcounts <- readcounts[,c(1,3,5,7,9,11,13,15,17,19,21,23)]
+colnames(readcounts) <- c("HypertrophicScar_01", "HypertrophicScar_02", 
+                          "HypertrophicScar_03", "HypertrophicScar_04", 
+                          "HypertrophicScar_05", "keloid_01", "keloid_02", 
+                          "keloid_03", "keloid_04", "normotrophicScar_01", 
+                          "normotrophicScar_02", "normotrophicScar_03")
+
+#filter low read genes with sum of below 3 for all samples within tissue types.
+readcounts <- readcounts[rowSums(readcounts[])>3,]
+
+```
+
+
+Following the creation of the count matrix, I used biomaRt to get the HGNC symbols of the genes to identify them by name. After alignment, the genes were labeled with ensembl ids. I also removed the version code on the ensembl ids.
+```{r}
+#get gene names, use for downstream
+library(tidyverse)
+library(dplyr)
+library(biomaRt)
+library(tibble)
+head(readcounts)
+readcounts_duplicate <- readcounts
+readcounts_duplicate$ensembl_gene_id <- rownames(readcounts)
+
+
+#the gene ids here are GENCODE IDs, so I remove the version number off the ensembl id
+readcounts_duplicate$ensembl_gene_id <- gsub('\\..+$', '', readcounts_duplicate$ensembl_gene_id)
+rownames(readcounts) <- readcounts_duplicate$ensembl_gene_id
+#head(readcounts)
+#head(readcounts_duplicate)
+
+
+#run biomart
+readcounts_duplicate$ensembl_gene_id <- as.character(readcounts_duplicate$ensembl_gene_id)
+
+mart <- useMart("ensembl")
+mart <- useDataset("hsapiens_gene_ensembl", mart <- mart)
+genes <-  readcounts_duplicate$ensembl_gene_id
+#head(genes)
+gene_IDs <- getBM(filters= "ensembl_gene_id", attributes= c("ensembl_gene_id",
+                                                            "hgnc_symbol"),
+              values = genes, mart= mart)
+head(gene_IDs)
+
+```
+
+
+### Differential Gene Expression Analysis using DESeq2: Initial run all three levels: Keloid Scar, Normotrophic Scar, and Hypertrophic Scar)
+
+Here I set a factor with all three levels. Because it was a three way comparison, DESeq2 used hypertrophic scars as the default 'control' variable in both instances.
+```{r}
+#make a factor - separate all three levels
+scartype <- data.frame(condition = c(1:12))
+sample_name <- colnames(readcounts)
+rownames(scartype) <- sample_name
+
+#split between Keloid Scar, Normotrophic Scar, and Hypertrophic Scar
+scartype[grep("Hypertrophic", row.names(scartype)), 1] = "hypertrophic"
+scartype[grep("keloid", row.names(scartype)), 1] = "keloid"
+scartype[grep("normotrophic", row.names(scartype)), 1] = "normotrophic"
+
+```
+
+
+Based on the PCA plot, the samples are distinctly separated. Keloids are on the 
+far right of the graph beyond one zero, and Hypertrophic scars and Normotrophic 
+scars are on the far right side. Hypertrophic scars and Normotrophic 
+scars are further separated from each other. There is an outlier in the keloid group.
+In the following analysis, I did not remove the outlier sample as it was also retained 
+in the paper. However, It may have skewed the analysis and caused more genes to be 
+represented as differentially expressed. The sample is obviously different in the 
+produced heatmaps as well. Future analysis should remove this sample and compare results
+between this analysis and the paper's published results. 
+```{r}
+#maintaining all three levels
+library(DESeq2)
+library(ggplot2)
+library(magrittr)
+library(pheatmap)
+
+cds <- DESeqDataSetFromMatrix(countData = readcounts, colData = scartype, design = ~ condition)
+cds <- estimateSizeFactors(cds)
+cds <- estimateDispersions(cds)
+plotDispEsts(cds)
+
+#plot pca
+set.seed(12345)
+scartype = as.factor(scartype)
+cds_norm <- vst(cds)
+plotPCA(
+  cds_norm
+)
+
+
+#get differentialy expressed genes
+diffexp_cds <- DESeq(cds)
+diffexp_res_cds <- results(diffexp_cds)
+diffexp_res_cds
+
+
+#find number of genes (sum) that are diff. expressed. Paper cutoff: log2 fold change 
+#> 1 & adjusted P-Value < 0.1
+#I want over and under expressed genes, so running padj < 0.05 log2FoldChange > 1 
+#or log2FoldChange < -1
+diffexp_res_cds <- na.omit(diffexp_res_cds)
+num_of_genes <- sum(diffexp_res_cds$padj < 0.05 & diffexp_res_cds$log2FoldChange > 1 | diffexp_res_cds$padj < 0.05 & diffexp_res_cds$log2FoldChange < -1, na.rm=TRUE)
+num_of_genes
+
+
+#create dataframe where pvalue is < 0.05 and log2FoldChange > 1 or log2FoldChange < -1
+res_genes <- diffexp_res_cds[diffexp_res_cds$padj < 0.05 & diffexp_res_cds$log2FoldChange > 1 | diffexp_res_cds$padj < 0.05 & diffexp_res_cds$log2FoldChange < -1, ]
+
+
+#subset normvalues to have only the diffexpgenes genes
+diffexpgenes <- row.names(res_genes)
+normvalues <- counts(cds, normalized=TRUE)
+diffexpvalues <- as.data.frame(normvalues[diffexpgenes, ])
+
+rownames(diffexpvalues) <- ifelse(rownames(diffexpvalues) %in% gene_IDs$ensembl_gene_id, gene_IDs$hgnc_symbol, rownames(diffexpvalues))
+head(diffexpvalues)
+print(nrow(diffexpvalues))
+
+#Quickly observe patterns of diff expressed genes data frame
+# create heatmap using pheatmap
+pheatmap(diffexpvalues)
+```
+
+
+118 differentially expressed genes was a very low number. It was pointed out to 
+me I was only getting 118 genes because DESeq2 was making two different comparisons, 
+and these were only the the differences the instance of normotrophic scars and 
+hypertrophic scars. Below I extracted the instance comparisons and saw that 
+DESeq2 was comparing keloid_vs_hypertrophic to normotrophic_vs_hypertrophic. I decided 
+it would be helpful to extract the number of genes differentially expressed between 
+these two instances. This will give us a glimpse of how different the gene composition  
+is between scar types at first glance.
+
+
+The venn diagram below shows that there aren't that many genes that are different 
+between normotrophic and hypertrophic scars. But there is a larger sum of genes 
+differentially expressed between keloids and hyperthropic scars. This was a helpful 
+way to show there is a genetic distinction between the three scar types.
+
+```{r}
+#can specify the comparison looking for
+resultsNames(diffexp_cds)
+#[1] "Intercept"                              "condition_keloid_vs_hypertrophic"       "condition_normotrophic_vs_hypertrophic"
+
+KVH <- results(diffexp_cds, name = "condition_keloid_vs_hypertrophic")
+HVN <- results(diffexp_cds, name = "condition_normotrophic_vs_hypertrophic")
+
+
+#do all this for each 
+#find number of genes (sum) that are diff. expressed. Paper cutoff: log2 fold change > 1 & adjusted P-Value < 0.1
+KVH <- na.omit(KVH)
+HVN <- na.omit(HVN )
+
+KVH_num_of_genes <- sum(KVH$padj < 0.05 & KVH$log2FoldChange > 1 | KVH$padj < 0.05 & KVH$log2FoldChange < -1, na.rm=TRUE)
+KVH_num_of_genes
+
+HVN_num_of_genes <- sum(HVN$padj < 0.05 & HVN$log2FoldChange > 1 | HVN$padj < 0.05 & HVN$log2FoldChange < -1, na.rm=TRUE)
+HVN_num_of_genes
+
+
+#create dataframe where pvalue is < 0.05 and log2FoldChange > 1 or log2FoldChange < -1
+KVH_res_genes <- KVH[KVH$padj < 0.05 & KVH$log2FoldChange > 1 | KVH$padj < 0.05 & KVH$log2FoldChange < -1, ]
+HVN_res_genes <- HVN[HVN$padj < 0.05 & HVN$log2FoldChange > 1 | HVN$padj < 0.05 & HVN$log2FoldChange < -1, ]
+
+
+#get list of all resulting diffexpgenes genes
+rownames(KVH_res_genes) <- ifelse(rownames(KVH_res_genes) %in% gene_IDs$ensembl_gene_id, gene_IDs$hgnc_symbol, rownames(KVH_res_genes))
+rownames(HVN_res_genes) <- ifelse(rownames(HVN_res_genes) %in% gene_IDs$ensembl_gene_id, gene_IDs$hgnc_symbol, rownames(HVN_res_genes))
+
+KVH_diffexpgenes <- row.names(KVH_res_genes)
+HVN_diffexpgenes <- row.names(HVN_res_genes)
+overlapping <- intersect(KVH_diffexpgenes,HVN_diffexpgenes)
+
+
+#get list of genes in KVH and HVN, make venn diagram
+library(VennDiagram)
+#make a venn diagram, should be 100%
+#use diff expressed values to gene overlap by group
+
+#light purple and light gray "#9a6aba" "#e2e1dd"
+colors <- c ("#9a6aba", "#e2e1dd")
+venn.diagram(x = list(KVH_diffexpgenes, HVN_diffexpgenes),
+             category.names = c("keloid vs hyper.", "normo. vs hyper."),
+             filename="scar_overlap.png",
+             output=TRUE,
+             imagetype = "png",
+             scaled=FALSE,
+             col="black",
+             fill=colors,
+             cat.col = "black",
+             cat.cex =2,
+             margin=0.25)
+
+
+
+ordered_HVN_res <- HVN_res_genes[order(HVN_res_genes$pvalue),]
+head(ordered_HVN_res,10)
+
+
+ordered_KVH_res_genes <- KVH_res_genes[order(KVH_res_genes$pvalue),]
+head(ordered_KVH_res_genes,10)
+
+```
+
+
+In the code chunk below, I am investigating the results above before I look into Keloid versus reversible scars. I pulled the list of the top ten significant genes (lowest p-value). I also made a list of overlapping genes. In future analysis, I would like to look at the go terms of the overlapping genes and see what biological process they are involved with.
+```{r}
+#keep just top 10 of orderd res
+
+ten_ordered_HVN_res <- ordered_HVN_res[c(1:10),]
+ten_ordered_KVH_res_genes <- ordered_KVH_res_genes[c(1:10),]
+
+name <- rownames(ten_ordered_HVN_res)
+print(name)
+
+name2 <- rownames(ten_ordered_KVH_res_genes)
+print(name2)
+
+
+print(overlapping)
+```
+
+
+
+### Differential Gene Expression Analysis using DESeq2: Keloid Scar vs Reversible Scars(Normotrophic Scar & Hypertrophic Scar)
+
+
+Here I grouped Normotrophic Scars & Hypertrophic Scars as a "reversible" condition 
+as was done in the paper. 
+
+```{r}
+# Keloid Scar vs Reversible Scars(Normotrophic Scar & Hypertrophic Scar)
+#make a factor
+scartype2 <- data.frame(condition = c(1:12))
+sample_name <- colnames(readcounts)
+rownames(scartype2) <- sample_name
+
+#split between keloid and reversible
+scartype2[grep("Hypertrophic", row.names(scartype2)), 1] = "reversible"
+scartype2[grep("keloid", row.names(scartype2)), 1] = "keloid"
+scartype2[grep("normotrophic", row.names(scartype2)), 1] = "reversible"
+
+
+
+# run DEseq2
+library(DESeq2)
+library(ggplot2)
+library(magrittr)
+library(pheatmap)
+
+cds2 <- DESeqDataSetFromMatrix(countData = readcounts, 
+                               colData = scartype2, design = ~ condition)
+cds2 <- estimateSizeFactors(cds2)
+cds2 <- estimateDispersions(cds2)
+plotDispEsts(cds2)
+
+#plot pca
+set.seed(12345)
+scartype2 = as.factor(scartype2)
+cds2_norm <- vst(cds2)
+plotPCA(
+  cds2_norm
+)
+
+
+#get differentialy expressed genes
+diffexp_cds2 <- DESeq(cds2)
+diffexp_res_cds2 <- results(diffexp_cds2)
+#head(diffexp_res_cds2)
+```
+
+
+To visulize and rank the genes, I needed to shrink the log fold change. Shrinking 
+the dataset moves nonsignificant results to the base mean, which allows us to 
+"remove" them from the visualization process and reduce noise. Following this 
+I can look at the mean of the normalized counts. In the graph below, we can see 
+that there are more genes being down regulated in both the shrunken and unshruken plot. 
+The graph also indicates that there are almost no genes with similar mean 
+expression levels. This further indicates the genetic difference of Keloids to 
+reversible scars.
+```{r}
+#plot MA
+print(DESeq2::plotMA(diffexp_res_cds2, ylim=c(-5,5)))
+
+
+#get the resulting names of the cds object.
+resultsNames(diffexp_cds2)
+#[1] "Intercept"                      "condition_reversible_vs_keloid"
+resLFC <- lfcShrink(diffexp_cds2, coef="condition_reversible_vs_keloid", 
+                    type="apeglm")
+print(DESeq2::plotMA(resLFC, ylim=c(-5,5)))
+
+
+#will have to run dev.off() maybe? can't click the graph
+idx <- identify(resLFC$baseMean, resLFC$log2FoldChange)
+rownames(resLFC)[idx]
+```
+
+
+I kept the lfc shrink object for visualization purposes. The volcano plot below indicates that most of the significant genes arevdown regulated in keloids in relation to the reversible scars.
+```{r}
+# Keloid Scar vs Reversible Scars(Normotrophic Scar & Hypertrophic Scar)
+#volcano plot
+library(tibble)
+library(org.Hs.eg.db)
+library(EnhancedVolcano)
+library(ggrepel)
+#volcano plot of diff expressed genes
+# use res...gets ymbol
+res_with_genes <- as.data.frame(resLFC)
+head(res_with_genes)
+res_with_genes$symbol <- mapIds(org.Hs.eg.db, keys = rownames(res_with_genes), 
+                                keytype = "ENSEMBL", column = "SYMBOL")
+
+
+#make volcano, flipping because it's easier to see the genes
+EnhancedVolcano(res_with_genes, x = "log2FoldChange", y = "padj", 
+                lab = res_with_genes$symbol, labCol = 'black',
+    labFace = 'bold',
+    boxedLabels = FALSE) + coord_flip()
+
+
+```
+
+
+Here I filtered the DESeq2 result object and removed genes below the pvalue threshold of 0.05 and that had a logfold change between 1 and -1.
+```{r}
+library(tibble)
+library(tidyverse)
+
+#find number of genes (sum) that are diff. expressed. Paper cutoff: log2 fold change > 1 & adjusted P-Value < 0.1
+resLFC <- na.omit(resLFC)
+num_of_genes <- sum(resLFC$padj < 0.05 & resLFC$log2FoldChange > 1 | 
+                      resLFC$padj < 0.05 & resLFC$log2FoldChange < -1, 
+                    na.rm=TRUE)
+#num_of_genes
+
+
+#create dataframe where pvalue is < 0.05 and log2FoldChange > 1 or log2FoldChange < -1
+res_sig_genes <- resLFC[resLFC$padj < 0.05 & resLFC$log2FoldChange > 1 | 
+                          resLFC$padj < 0.05 & resLFC$log2FoldChange < -1, ]
+print(head(res_sig_genes))
+
+#subset normvalues to have only the diffexpgenes genes
+sig_gene_names <- row.names(res_sig_genes)
+normvalues <- counts(cds2, normalized=TRUE)
+sig_diffexpgenes <- normvalues[sig_gene_names, ] 
+
+#use the below line to replace ensembl id, but I do this later 
+#rownames(sig_diffexpgenes) <- ifelse(rownames(sig_diffexpgenes) %in% gene_IDs$ensembl_gene_id, gene_IDs$hgnc_symbol, rownames(sig_diffexpgenes))
+#print(head(sig_diffexpgenes))
+print("number of significant differential expressed genes:")
+print(nrow(sig_diffexpgenes))
+
+
+```
+
+
+After filtering, I made a list of genes that were upregulated and down regulated. GO term regulation analysis was don with Panther, a website for inferring GO terms. In the corresponding powerpoint presentation, I found that these genes fit in the following categories: Regulation of cell structures and processes; metabolic processes; Neural and sensory perception
+
+```{r}
+#genes with strongest down regulation:
+rownames(res_sig_genes) <- ifelse(rownames(res_sig_genes) %in% 
+                                    gene_IDs$ensembl_gene_id, 
+                                  gene_IDs$hgnc_symbol, rownames(res_sig_genes))
+print(head(res_sig_genes[ order( res_sig_genes$log2FoldChange ), ]))
+
+
+
+#genes with the strongest up regulation:
+print(head(res_sig_genes[ order( -res_sig_genes$log2FoldChange ), ]))
+```
+
+
+
+In the two code chunks below, I clustered the genes using hclust and created a heat map that shows the expression patterns of genes in each sample. I used a k of 3 to cluster the samples. The first heatmap is a subset of genes whos gene expression sum was above 5000. The second heat map is another subest, but this time showing genes with an expression sum of 500.
+```{r}
+# Keloid Scar vs Reversable Scars(Normotrophic Scar & Hypertrophic Scar)
+library(pheatmap)
+#defining a dataframe to use as row annotation for cluster
+subset_genes <- as.matrix(sig_diffexpgenes[rowSums(sig_diffexpgenes)>5000,])
+rownames(subset_genes) <- ifelse(rownames(subset_genes) %in% 
+                                   gene_IDs$ensembl_gene_id, 
+                                 gene_IDs$hgnc_symbol, rownames(subset_genes))
+#head(subset_genes)
+
+library(cluster)
+#create an hclust object with the diffexpvalues matirx
+sig_dist = as.dist(1 - cor((subset_genes)))
+sig_hclust = hclust(sig_dist, method="average")
+plot(sig_hclust)
+
+#originally I wanted 8 clusters but the grouping was off, reduced it to 3
+sig_hclust_3 = cutree(sig_hclust, k=3)
+#head(sig_hclust_8 , xlim)
+
+
+my_gene_col <- data.frame(cluster = ifelse(test = sig_hclust_3 == 1, yes = "cluster 1", 
+                                           no = ifelse(test=sig_hclust_3 == 2, yes = "cluster 2",
+                                                       no = "cluster 3")))
+
+
+
+#heatmap with normalized diff expressed genes, ungrouped, added annotation of
+#'keloid' or 'reversible', added cluster annotation
+pheatmap(subset_genes, annotation_col = scartype2, annotation_row = my_gene_col,
+         scale="row", cluster_cols = F, show_rownames = T, legend = TRUE,
+         fontsize_row = 6, width = 30, height = 30, clustering_method = "average")
+
+
+
+
+
+```
+
+
+```{r}
+# Keloid Scar vs Reversable Scars(Normotrophic Scar & Hypertrophic Scar)
+library(pheatmap)
+#defining a dataframe to use as row annotation for cluster
+subset_genes <- as.matrix(sig_diffexpgenes[rowSums(sig_diffexpgenes)>500,])
+rownames(subset_genes) <- ifelse(rownames(subset_genes) %in% 
+                                   gene_IDs$ensembl_gene_id, 
+                                 gene_IDs$hgnc_symbol, rownames(subset_genes))
+#head(subset_genes)
+
+library(cluster)
+#create an hclust object with the diffexpvalues matirx
+sig_dist = as.dist(1 - cor((subset_genes)))
+sig_hclust = hclust(sig_dist, method="average")
+plot(sig_hclust)
+
+#originally I wanted 8 clusters but the grouping was off, reduced it to 3
+sig_hclust_3 = cutree(sig_hclust, k=3)
+#head(sig_hclust_8 , xlim)
+
+
+
+my_gene_col <- data.frame(cluster = ifelse(test = sig_hclust_3 == 1, yes = "cluster 1", 
+                                           no = ifelse(test=sig_hclust_3 == 2, yes = "cluster 2",
+                                                       no = "cluster 3")))
+
+
+
+#heatmap with normalized diff expressed genes, ungrouped, added annotation of
+#'keloid' or 'reversible', added cluster annotation
+pheatmap(subset_genes, annotation_col = scartype2, annotation_row = my_gene_col,
+         scale="row", cluster_cols = F, show_rownames = T, legend = TRUE,
+         fontsize_row = 6, width = 30, height = 30, clustering_method = "average")
+
+
+
+
+```
+
+
+
+
+### Identify overrepresented GO-terms for genes
+
+We look at overrepresented to find what function is being represented the most in the samples compared to the expected function in a given organism. Gene ontology terms (GO terms) were gathered using GOstats and GO.db libraries. The go terms below were similar to the GO terms found in the paper (see the figure on slide 16 in the corresponding presentation). 37 GO terms passed the p value threshold. However, in GO terms just under the pvalue threshold, there were more terms related to immune response.
+```{r}
+# Keloid Scar vs Reversable Scars(Normotrophic Scar & Hypertrophic Scar)
+library(GOstats)
+library(GO.db)
+library(Category)
+library(org.Hs.eg.db)
+library(biomaRt)
+library("AnnotationDbi")
+
+#run biomart
+eg_readcounts_duplicate <- readcounts_duplicate
+eg_readcounts_duplicate$ensembl_gene_id <- as.character(readcounts_duplicate$ensembl_gene_id)
+
+
+eg_readcounts_duplicate$ENTREZID_id = mapIds(org.Hs.eg.db,
+                       keys=readcounts_duplicate$ensembl_gene_id, 
+                        column="ENTREZID",
+                        keytype="ENSEMBL",
+                        multiVals="first")
+
+head(eg_readcounts_duplicate)
+eg_gene_ids <- eg_readcounts_duplicate[,c(13,14)]
+#head(eg_gene_ids)
+
+eg_sig_diffexpgenes <- sig_diffexpgenes
+rownames(eg_sig_diffexpgenes) <- ifelse(rownames(eg_sig_diffexpgenes) %in% 
+                                           eg_gene_ids$ensembl_gene_id, 
+                                         eg_gene_ids$ENTREZID_id, 
+                                         rownames(eg_sig_diffexpgenes))
+#head(eg_sig_diffexpgenes)
+
+eg_readcounts_nonzero <- readcounts[rowSums(readcounts[])>10,]
+eg_readcounts_nonzero <- tibble::rownames_to_column(eg_readcounts_nonzero, "ENTREZID_id")
+eg_readcounts_nonzero <- drop_na(eg_readcounts_nonzero)
+#head(eg_readcounts_nonzero)
+
+
+eg_readcounts_nonzero$ENTREZID_id <- ifelse(eg_readcounts_nonzero$ENTREZID_id  %in% 
+                                           eg_gene_ids$ensembl_gene_id, 
+                                         eg_gene_ids$ENTREZID_id, 
+                                         eg_readcounts_nonzero$ENTREZID_id )
+#head(eg_readcounts_nonzero)
+eg_readcounts_nonzero <- drop_na(eg_readcounts_nonzero)
+eg_non_duplicate_readcounts_nonzero <- eg_readcounts_nonzero %>% distinct(ENTREZID_id, .keep_all = TRUE)
+eg_readcounts <- data.frame(eg_non_duplicate_readcounts_nonzero , row.names = 1)
+#head(eg_readcounts)
+
+
+params=new("GOHyperGParams", 
+  geneIds=rownames(eg_sig_diffexpgenes), #ensmbl
+  universeGeneIds=rownames(eg_readcounts), #ensmbl
+  annotation="org.Hs.eg.db", 
+  ontology="BP", 
+  pvalueCutoff=0.001, 
+  conditional=TRUE, 
+  testDirection="over")
+
+#?hyperGTest()
+
+```
+
+```{r}
+(overRepresented=hyperGTest(params))
+
+summary(overRepresented)[,c(1,2,5,6,7)]
+
+#sorted_over_rep_expression <- overRepresented(1,2,5,6,7)
+```
+
+
+#Transcription Factors Inference: Keloid Scar vs Reversable Scars(Normotrophic Scar & Hypertrophic Scar)
+```{r}
+#source("utils-omnipath.R", local = knitr::knit_global())
+#r, file="utils-omnipath.R"}
+```
+
+
+Here I'm prepping the DESeq2 data to be an input for use in the Transcription Factor 
+inference analysis (Pau Badia-i-Mompel). First I add the HGNC symbol to the "readcounts" data. Then I 
+got the deferentially expressed genes (up regulated and down regulated). Finally 
+I subset the the differentially expressed data columns to keep only log2fold change, 
+the p value, and the f statistic.
+```{r}
+#get gene names, use for downstream
+library(tidyverse)
+library(dplyr)
+library(biomaRt)
+library(tibble)
+
+#I can't simply replace the rownames here because there are duplicate HGNC symbols
+#so I tried filtering anything with a sum of less than 10, added a HGNC symbol 
+#then removed rows with duplicate hgnc symbols. After that, I set them to rownames
+readcounts_nonzero <- readcounts[rowSums(readcounts[])>10,]
+readcounts_nonzero <- tibble::rownames_to_column(readcounts_nonzero, "hgnc_symbol")
+readcounts_nonzero$hgnc_symbol <- ifelse(readcounts_nonzero$hgnc_symbol %in% 
+                                           gene_IDs$ensembl_gene_id, 
+                                         gene_IDs$hgnc_symbol, 
+                                         readcounts_nonzero$hgnc_symbol)
+#head(readcounts_nonzero)
+non_duplicate_readcounts_nonzero <- readcounts_nonzero %>% distinct(hgnc_symbol, 
+                                                                    .keep_all = TRUE)
+tf_inferance_counts <- data.frame(non_duplicate_readcounts_nonzero , 
+                                  row.names = 1)
+
+
+#not using lfcshrink result because I want the f stat, getting original result
+n_res_sig_genes <- diffexp_res_cds2[diffexp_res_cds2$padj < 0.05 & diffexp_res_cds2$log2FoldChange > 1 | 
+                          diffexp_res_cds2$padj < 0.05 & diffexp_res_cds2$log2FoldChange < -1, ]
+#head(n_res_sig_genes)
+
+get_deg <- as.data.frame(n_res_sig_genes[,c(2,4,5)])
+rownames(get_deg) <- ifelse(rownames(get_deg) %in% gene_IDs$ensembl_gene_id, 
+                            gene_IDs$hgnc_symbol, rownames(get_deg))
+head(get_deg)
+
+
+```
+
+
+The first step in running the transcription factor analysis is calculating the 
+weighted mean by using expression values in the read count data and the network file 
+downloaded through decoupleR. The column 'score' represents the weighted mean.
+```{r, file="utils-omnipath.R"}
+#library(devtools) #also need OmnipathR
+#install_github("saezlab/decoupleR")
+library(decoupleR)
+library(dplyr)
+library(tibble)
+library(tidyr)
+library(ggplot2)
+library(pheatmap)
+library(ggrepel)
+library(OmnipathR)
+
+counts <- as.matrix(tf_inferance_counts)
+design_obj <- scartype2
+deg <- get_deg
+head(deg) #extracting the obtained fstat and p-value from the contrast:
+#head(counts)
+#design_obj #make a tibble 18X2
+
+
+net <- decoupleR::get_dorothea(organism='human', levels=c('A', 'B', 'C'))
+#net <- get_collectri(organism='human', split_complexes=FALSE) #another method
+net
+
+
+# Run wmean
+sample_acts <- run_wmean(mat=counts, net=net, .source='source', .target='target',
+                  .mor='mor', times = 100, minsize = 5)
+sample_acts
+```
+
+
+Below we show the genes with the highest variable means. In this pheat map there 
+no further clustering of samples or genes. Here I am just showing the log2fold change 
+of the transcription factors with the 20 highest correlated weighted mean.
+```{r}
+n_tfs <- 20 #top 20 transcription factors
+
+# Transform to wide matrix
+sample_acts_mat <- sample_acts %>%
+  filter(statistic == 'norm_wmean') %>%
+  pivot_wider(id_cols = 'condition', names_from = 'source',
+              values_from = 'score') %>%
+  column_to_rownames('condition') %>%
+  as.matrix()
+
+# Get top tfs with more variable means across clusters
+tfs <- sample_acts %>%
+  group_by(source) %>%
+  summarise(std = sd(score)) %>%
+  arrange(-abs(std)) %>%
+  head(n_tfs) %>%
+  pull(source)
+sample_acts_mat <- sample_acts_mat[,tfs]
+
+# Scale per sample
+sample_acts_mat <- scale(sample_acts_mat)
+
+# Choose color palette #dark purple: "#57068c", light purple: "#9a6aba", light gray "#e2e1dd", dark blue: #007e8a"
+palette_length = 100
+my_color = colorRampPalette(c("#57068c", "#e2e1dd","#007e8a"))(palette_length)
+
+my_breaks <- c(seq(-3, 0, length.out=ceiling(palette_length/2) + 1),
+               seq(0.05, 3, length.out=floor(palette_length/2)))
+
+# Plot
+pheatmap(sample_acts_mat, border_color = NA, color=my_color, breaks = my_breaks) 
+```
+
+
+```{r}
+# Run wmean
+#mat_test=deg[, 'stat', drop=FALSE]
+#head(mat_test)
+contrast_acts <- run_wmean(mat=deg[, 'stat', drop=FALSE], net=net, .source='source', .target='target',
+                  .mor='mor', times = 100, minsize = 1)
+contrast_acts
+
+# Filter norm_wmean
+f_contrast_acts <- contrast_acts %>%
+  filter(statistic == 'norm_wmean') %>%
+  mutate(rnk = NA)
+f_contrast_acts
+
+
+# Filter top TFs in both signs
+msk <- f_contrast_acts$score > 0
+f_contrast_acts[msk, 'rnk'] <- rank(-f_contrast_acts[msk, 'score']) #below 0 score
+f_contrast_acts[!msk, 'rnk'] <- rank(-abs(f_contrast_acts[!msk, 'score'])) #above 0 score
+tfs <- f_contrast_acts %>%
+  arrange(rnk) %>%
+  head(n_tfs) %>%
+  pull(source)
+f_contrast_acts <- f_contrast_acts %>%
+  filter(source %in% tfs)
+f_contrast_acts
+
+# Plot
+ggplot(f_contrast_acts, aes(x = reorder(source, score), y = score)) + 
+    geom_bar(aes(fill = score), stat = "identity") +
+    scale_fill_gradient2(low = "#57068c", high = "#007e8a", 
+        mid = "whitesmoke", midpoint = 0) + 
+    theme_minimal() +
+    theme(axis.title = element_text(face = "bold", size = 12),
+        axis.text.x = 
+            element_text(angle = 45, hjust = 1, size =10, face= "bold"),
+        axis.text.y = element_text(size =10, face= "bold"),
+        panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank()) +
+    xlab("Pathways")
+
+```
+
+
+Now that we're connected to the transcription factor network
+AEBP1, CREB3L1, RUNX2, ZNF469(Lin) and SOX9 and CBFA1(Naitoh). The previously 
+listed transcription factors were identified from experiments using healthy, 
+scar free skin as a control.
+ 
+```{r}
+#relative to known target
+tf <- 'RUNX2'
+
+df <- net %>%
+  filter(source == tf) %>%
+  arrange(target) %>%
+  mutate(ID = target, color = "3") %>%
+  column_to_rownames('target')
+head(df)
+ 
+
+inter <- sort(intersect(rownames(deg),rownames(df)))
+df <- df[inter, ]
+df[,c('logfc', 't_value', 'p_value')] <- deg[inter, ]
+
+df <- df %>%
+  mutate(color = if_else(mor > 0 & t_value > 0, '1', color)) %>%
+  mutate(color = if_else(mor > 0 & t_value < 0, '2', color)) %>%
+  mutate(color = if_else(mor < 0 & t_value > 0, '2', color)) %>%
+  mutate(color = if_else(mor < 0 & t_value < 0, '1', color))
+
+head(df)
+ggplot(df, aes(x = logfc, y = -log10(p_value), color = color, size=abs(mor))) +
+  geom_point() +
+  scale_colour_manual(values = c("#007e8a","#57068c","grey")) + #purple is deactivating, #blue is activating
+  geom_label_repel(aes(label = ID, size=1)) + 
+  theme_minimal() +
+  theme(legend.position = "none") +
+  geom_vline(xintercept = 0, linetype = 'dotted') +
+  geom_hline(yintercept = 0, linetype = 'dotted') +
+  ggtitle(tf)
+```
+
+
+
+### Discussion 
+
+Initial analysis of this dataset went well. I was able to verify that there is a distinct genetic difference between keloids and other scars, and that a hallmark of keloids is that a number of genes are surpessed or down regulated. I also was able to find similar GO Terms that were also found in the paper. Finally, identifying the differential expression of transcription Factors ZNF263, TCF4, and HNF1B gives me a lead of potential transcription factors to test. Because the paper that I reference has not been published, it's difficult to verify the true impact of the results in this project. In the future I would like to use the recently released FPKM count file that the authors of the paper released, and I would like to input the GO terms to the KEGG data base. 
+
+
+### References
+
+Choi M, Lyu J, Muthuramalingam K, Lee E, Oh Y, Sohn I, Lee J, Kim S. Keloid-Specific Gene Expression Profiling for Accurate Diagnostic and Therapeutic Applications. DOI: 10.21203/rs.3.rs-1104408/v1 
+
+McDermaid A, Monier B, Zhao J, Liu B, Ma Q. Interpretation of differential gene expression results of RNA-seq data: review and integration. Brief Bioinform. 2019 Nov 27;20(6):2044-2054. doi: 10.1093/bib/bby067. PMID: 30099484; PMCID: PMC6954399.
+
+
+Lin P, Zhang G, Peng R, Zhao M, Li H. Increased expression of bone/cartilage-associated genes and core transcription factors in keloids by RNA sequencing. Exp Dermatol. 2022 Oct;31(10):1586-1596. doi: 10.1111/exd.14630. Epub 2022 Jul 3. PMID: 35730251.
+
+
+Naitoh M, Kubota H, Ikeda M, Tanaka T, Shirane H, Suzuki S, Nagata K. Gene expression in human keloids is altered from dermal to chondrocytic and osteogenic lineage. Genes Cells. 2005 Nov;10(11):1081-91. doi: 10.1111/j.1365-2443.2005.00902.x. PMID: 16236136.
+
+
+Badia-i-Mompel P., Vélez Santiago J., Braunger J., Geiss C., Dimitrov D., Müller-Dott S., Taus P., Dugourd A., Holland C.H., Ramirez Flores R.O. and Saez-Rodriguez J. 2022. decoupleR: ensemble of computational methods to infer biological activities from omics data. Bioinformatics Advances.
